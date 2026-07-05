@@ -170,21 +170,16 @@ function AppContent() {
     const votesChannel = supabase
       .channel('votes-changes')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'votes' }, (payload) => {
-        const vote = payload.new as { poll_id: string; choice: 'yes' | 'no' }
-        setPolls(prev => prev.map(p => {
-          if (p.id === vote.poll_id) {
-            return {
-              ...p,
-              yes_votes: vote.choice === 'yes' ? p.yes_votes + 1 : p.yes_votes,
-              no_votes: vote.choice === 'no' ? p.no_votes + 1 : p.no_votes
-            }
-          }
-          return p
-        }))
-        if (globeRef) {
-          globeRef.spawnArc(vote.choice)
+        const vote = payload.new as { poll_id: string; user_id: string; choice: 'yes' | 'no' }
+        // NOTE: don't manually increment poll counts here. The `polls-changes`
+        // channel below already refetches accurate counts from the DB whenever
+        // your vote-count trigger updates the polls table. Incrementing here too
+        // was double-counting the voter's own vote (once optimistically in
+        // handleVote, once again from this realtime echo of their own insert).
+        if (vote.user_id !== user?.id) {
+          globeRef?.spawnArc(vote.choice)
+          pushFeedEvent(`Someone voted ${vote.choice.toUpperCase()}`, vote.choice)
         }
-        pushFeedEvent(`Someone voted ${vote.choice.toUpperCase()}`, vote.choice)
       })
       .subscribe()
 
@@ -192,7 +187,7 @@ function AppContent() {
       supabase.removeChannel(pollsChannel)
       supabase.removeChannel(votesChannel)
     }
-  }, [fetchPolls, globeRef])
+  }, [fetchPolls, globeRef, user])
 
   const pushFeedEvent = useCallback((text: string, side: 'yes' | 'no') => {
     setFeedItems(prev => [{ text, side }, ...prev.slice(0, 7)])
