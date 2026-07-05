@@ -193,6 +193,27 @@ function AppContent() {
     setFeedItems(prev => [{ text, side }, ...prev.slice(0, 7)])
   }, [])
 
+  // Re-fetch a single poll row from the DB and patch it into state.
+  // Used after voting to guarantee the displayed count matches Supabase,
+  // correcting any drift instead of relying only on the optimistic update.
+  const refetchPoll = useCallback(async (pollId: string) => {
+    const { data: updatedPoll, error } = await supabase
+      .from('polls')
+      .select('*, profiles!polls_created_by_fkey(*)')
+      .eq('id', pollId)
+      .single()
+
+    if (error) {
+      console.error('refetchPoll error', error)
+      return null
+    }
+
+    if (updatedPoll) {
+      setPolls(prev => prev.map(p => (p.id === updatedPoll.id ? (updatedPoll as Poll) : p)))
+    }
+    return updatedPoll
+  }, [])
+
   const navigateTo = (v: View, poll?: Poll) => {
     setView(v)
     if (v === 'poll' && poll) {
@@ -239,6 +260,9 @@ function AppContent() {
       showToast('Vote counted')
       globeRef?.spawnArc(choice)
       pushFeedEvent(`You voted ${choice.toUpperCase()}`, choice)
+      // Correct the optimistic count with the authoritative DB row
+      // (covers the DB trigger applying differently than our local +1 guess).
+      refetchPoll(poll.id)
     }
   }
 
