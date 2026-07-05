@@ -19,6 +19,30 @@ function getPercent(yes: number, no: number): { y: number; n: number } {
   return { y: Math.round(yes / total * 100), n: Math.round(no / total * 100) }
 }
 
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/i
+const COMMENT_MAX_LENGTH = 600
+const BLOCKED_COMMENT_TERMS = [
+  'fuck', 'shit', 'bitch', 'asshole', 'dick', 'pussy', 'boobs', 'nude',
+  'sex', 'porn', 'rape', 'slut', 'whore', 'horny', 'kill yourself'
+]
+
+function isValidEmail(email: string): boolean {
+  return EMAIL_PATTERN.test(email.trim())
+}
+
+function getCommentModerationError(text: string): string | null {
+  const trimmed = text.trim()
+  const normalized = trimmed.toLowerCase()
+
+  if (trimmed.length < 3) return 'Write a little more before posting.'
+  if (trimmed.length > COMMENT_MAX_LENGTH) return `Keep comments under ${COMMENT_MAX_LENGTH} characters.`
+  if (BLOCKED_COMMENT_TERMS.some(term => normalized.includes(term))) {
+    return 'Please keep comments respectful and suitable for everyone.'
+  }
+
+  return null
+}
+
 function getTimeRemaining(endsAt: string): string {
   const now = new Date()
   const ends = new Date(endsAt)
@@ -115,22 +139,36 @@ function AppContent() {
       .from('comments')
       .select('*, profiles!comments_user_id_fkey(*)')
       .eq('poll_id', pollId)
+      .eq('is_hidden', false)
       .order('created_at', { ascending: false })
 
     if (data) {
       // Fetch user's reactions
       let commentsWithReactions = data as Comment[]
       if (user) {
-        const { data: reactions } = await supabase
-          .from('comment_reactions')
-          .select('comment_id, reaction')
-          .eq('user_id', user.id)
+        const [{ data: reactions }, { data: reports }] = await Promise.all([
+          supabase
+            .from('comment_reactions')
+            .select('comment_id, reaction')
+            .eq('user_id', user.id),
+          supabase
+            .from('comment_reports')
+            .select('comment_id')
+            .eq('user_id', user.id)
+        ])
 
+        const reportedIds = new Set((reports || []).map(r => r.comment_id))
         if (reactions) {
           const reactionMap = new Map(reactions.map(r => [r.comment_id, r.reaction as 'like' | 'dislike']))
           commentsWithReactions = data.map(c => ({
             ...c,
-            userReaction: reactionMap.get(c.id) || null
+            userReaction: reactionMap.get(c.id) || null,
+            userReported: reportedIds.has(c.id)
+          }))
+        } else {
+          commentsWithReactions = data.map(c => ({
+            ...c,
+            userReported: reportedIds.has(c.id)
           }))
         }
       }
@@ -300,8 +338,19 @@ function AppContent() {
     e.preventDefault()
     setAuthError('')
 
+    const email = authEmail.trim()
+    if (!isValidEmail(email)) {
+      setAuthError('Please enter a valid email address')
+      return
+    }
+
+    if (!authPassword) {
+      setAuthError('Please enter your password')
+      return
+    }
+
     if (authMode === 'login') {
-      const { error } = await signIn(authEmail, authPassword)
+      const { error } = await signIn(email, authPassword)
       if (error) {
         setAuthError(error)
       } else {
@@ -323,7 +372,7 @@ function AppContent() {
         setAuthError('Please enter a display name')
         return
       }
-      const { error } = await signUp(authEmail, authPassword, authName.trim())
+      const { error } = await signUp(email, authPassword, authName.trim())
       if (error) {
         setAuthError(error)
       } else {
@@ -392,7 +441,13 @@ function AppContent() {
   }
 
   const handlePostComment = async (pollId: string, text: string, side: 'yes' | 'no') => {
-    if (!user || !text.trim()) return
+    if (!user || !text.trim()) return false
+
+    const moderationError = getCommentModerationError(text)
+    if (moderationError) {
+      showToast(moderationError)
+      return false
+    }
 
     const { data } = await supabase
       .from('comments')
@@ -408,7 +463,34 @@ function AppContent() {
     if (data) {
       setComments(prev => [{ ...data, userReaction: null } as Comment, ...prev])
       showToast('Comment posted')
+      return true
     }
+    showToast('Failed to post comment')
+    return false
+  }
+
+  const handleReportComment = async (commentId: string) => {
+    if (!user) {
+      setShowAuthModal(true)
+      return
+    }
+
+    const { error } = await supabase
+      .from('comment_reports')
+      .insert({ comment_id: commentId, user_id: user.id })
+
+    if (error) {
+      showToast(error.code === '23505' ? 'You already reported this comment' : 'Could not report comment')
+      return
+    }
+
+    showToast('Report received')
+    setComments(prev => prev.map(comment => (
+      comment.id === commentId
+        ? { ...comment, userReported: true, report_count: (comment.report_count || 0) + 1 }
+        : comment
+    )))
+    if (activePoll) fetchComments(activePoll.id)
   }
 
   const handleCreatePoll = async (e: React.FormEvent) => {
@@ -536,6 +618,7 @@ function AppContent() {
           onVote={handleVote}
           onSave={handleSave}
           onPostComment={handlePostComment}
+          onReport={handleReportComment}
           onReact={handleReact}
           onSortChange={setCommentSort}
         />
@@ -856,6 +939,8 @@ function HomeView({ polls, savedPollIds, onNavigate, onSave, feedItems, onGlobeR
   onGlobeReady: (ref: { spawnArc: (side: 'yes' | 'no') => void }) => void
 }) {
   const trending = [...polls].sort((a, b) => (b.yes_votes + b.no_votes) - (a.yes_votes + a.no_votes)).slice(0, 4)
+  const trendingIds = new Set(trending.map(poll => poll.id))
+  const morePolls = polls.filter(poll => !trendingIds.has(poll.id))
 
   return (
     <>
@@ -960,13 +1045,13 @@ function HomeView({ polls, savedPollIds, onNavigate, onSave, feedItems, onGlobeR
         </div>
       </section>
 
-      {/* All polls */}
+      {/* More polls */}
       <section style={{ maxWidth: '1280px', margin: '0 auto', padding: '0 40px 40px', position: 'relative', zIndex: 2 }}>
         <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: '22px' }}>
-          <h2 style={{ fontFamily: 'var(--font-display)', fontSize: '18.5px', letterSpacing: '0.2px', fontWeight: 700 }}>All polls</h2>
+          <h2 style={{ fontFamily: 'var(--font-display)', fontSize: '18.5px', letterSpacing: '0.2px', fontWeight: 700 }}>More polls</h2>
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxWidth: '900px' }}>
-          {polls.map(poll => (
+          {morePolls.map(poll => (
             <PollCard
               key={poll.id}
               poll={poll}
@@ -1055,7 +1140,7 @@ function PollCard({ poll, isSaved, onClick, onSave }: {
   )
 }
 
-function PollDetailView({ poll, comments, hasVoted, voteChoice, isSaved, commentSort, onNavigate, onVote, onSave, onPostComment, onReact, onSortChange }: {
+function PollDetailView({ poll, comments, hasVoted, voteChoice, isSaved, commentSort, onNavigate, onVote, onSave, onPostComment, onReport, onReact, onSortChange }: {
   poll: Poll
   comments: Comment[]
   hasVoted: boolean
@@ -1065,11 +1150,13 @@ function PollDetailView({ poll, comments, hasVoted, voteChoice, isSaved, comment
   onNavigate: (v: View) => void
   onVote: (p: Poll, c: 'yes' | 'no') => void
   onSave: (id: string) => void
-  onPostComment: (pollId: string, text: string, side: 'yes' | 'no') => void
+  onPostComment: (pollId: string, text: string, side: 'yes' | 'no') => Promise<boolean>
+  onReport: (commentId: string) => void
   onReact: (commentId: string, reaction: 'like' | 'dislike', current: 'like' | 'dislike' | null) => void
   onSortChange: (s: 'helpful' | 'newest') => void
 }) {
   const [commentText, setCommentText] = useState('')
+  const [commentError, setCommentError] = useState('')
   const p = getPercent(poll.yes_votes, poll.no_votes)
   const total = poll.yes_votes + poll.no_votes
 
@@ -1186,8 +1273,12 @@ function PollDetailView({ poll, comments, hasVoted, voteChoice, isSaved, comment
             </label>
             <textarea
               value={commentText}
-              onChange={e => setCommentText(e.target.value)}
+              onChange={e => {
+                setCommentText(e.target.value)
+                if (commentError) setCommentError('')
+              }}
               placeholder="Explain your reasoning..."
+              maxLength={COMMENT_MAX_LENGTH}
               style={{
                 width: '100%',
                 marginTop: '8px',
@@ -1203,11 +1294,21 @@ function PollDetailView({ poll, comments, hasVoted, voteChoice, isSaved, comment
                 outline: 'none',
               }}
             />
+            {commentError && (
+              <div style={{ color: 'var(--red)', fontFamily: 'var(--font-mono)', fontSize: '11px', marginTop: '7px' }}>
+                {commentError}
+              </div>
+            )}
             <button
-              onClick={() => {
-                if (commentText.trim() && voteChoice) {
-                  onPostComment(poll.id, commentText, voteChoice)
-                  setCommentText('')
+              onClick={async () => {
+                const moderationError = getCommentModerationError(commentText)
+                if (moderationError) {
+                  setCommentError(moderationError)
+                  return
+                }
+                if (voteChoice) {
+                  const posted = await onPostComment(poll.id, commentText, voteChoice)
+                  if (posted) setCommentText('')
                 }
               }}
               style={{
@@ -1311,6 +1412,26 @@ function PollDetailView({ poll, comments, hasVoted, voteChoice, isSaved, comment
                   }}
                 >
                   ▲ {comment.likes}
+                </button>
+                <button
+                  onClick={() => onReport(comment.id)}
+                  disabled={!!comment.userReported}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    background: comment.userReported ? 'rgba(255, 77, 106, 0.08)' : 'transparent',
+                    border: `1px solid ${comment.userReported ? 'var(--red)' : 'var(--line)'}`,
+                    color: comment.userReported ? 'var(--red)' : 'var(--muted)',
+                    borderRadius: '20px',
+                    padding: '5px 12px',
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: '11.5px',
+                    cursor: comment.userReported ? 'default' : 'pointer',
+                    opacity: comment.userReported ? 0.7 : 1,
+                  }}
+                >
+                  {comment.userReported ? 'Reported' : 'Report'}
                 </button>
                 <button
                   onClick={() => onReact(comment.id, 'dislike', comment.userReaction || null)}

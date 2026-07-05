@@ -43,9 +43,12 @@ export type Comment = {
   text: string
   likes: number
   dislikes: number
+  report_count?: number
+  is_hidden?: boolean
   created_at: string
   profiles?: Profile
   userReaction?: 'like' | 'dislike' | null
+  userReported?: boolean
 }
 
 export type SavedPoll = {
@@ -60,4 +63,11 @@ export type CommentReaction = {
   comment_id: string
   user_id: string
   reaction: 'like' | 'dislike'
+}
+
+export type CommentReport = {
+  id: string
+  comment_id: string
+  user_id: string
+  created_at: string
 }
