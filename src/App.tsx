@@ -75,7 +75,12 @@ function AppContent() {
       .order('created_at', { ascending: false })
 
     if (data) {
-      setPolls(data as Poll[])
+      const nextPolls = data as Poll[]
+      setPolls(nextPolls)
+      setActivePoll(current => {
+        if (!current) return current
+        return nextPolls.find(p => p.id === current.id) || current
+      })
     }
   }, [])
 
@@ -259,7 +264,9 @@ function AppContent() {
     }
 
     if (updatedPoll) {
-      setPolls(prev => prev.map(p => (p.id === updatedPoll.id ? (updatedPoll as Poll) : p)))
+      const poll = updatedPoll as Poll
+      setPolls(prev => prev.map(p => (p.id === poll.id ? poll : p)))
+      setActivePoll(current => (current?.id === poll.id ? poll : current))
     }
     return updatedPoll
   }, [])
