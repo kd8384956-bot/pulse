@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback } from 'react'
-import { Analytics } from "@vercel/analytics/next"
+import { useState, useEffect, useCallback, useRef } from 'react'
+import { Analytics } from '@vercel/analytics/react'
 import { AuthProvider, useAuth } from '@/hooks/useAuth'
 import { supabase, Poll, Comment, Profile } from '@/lib/supabase'
 import Globe from '@/components/Globe'
@@ -60,6 +60,8 @@ function getTimeRemaining(endsAt: string): string {
 
 function AppContent() {
   const { user, profile, loading, signIn, signUp, signOut } = useAuth()
+  const userRef = useRef(user)
+  useEffect(() => { userRef.current = user }, [user])
   const [view, setView] = useState<View>('home')
   const [polls, setPolls] = useState<Poll[]>([])
   const [activePoll, setActivePoll] = useState<Poll | null>(null)
@@ -286,29 +288,6 @@ function AppContent() {
     setFeedItems(prev => [{ text, side }, ...prev.slice(0, 7)])
   }, [])
 
-  // Re-fetch a single poll row from the DB and patch it into state.
-  // Used after voting to guarantee the displayed count matches Supabase,
-  // correcting any drift instead of relying only on the optimistic update.
-  const refetchPoll = useCallback(async (pollId: string) => {
-    const { data: updatedPoll, error } = await supabase
-      .from('polls')
-      .select('*, profiles!polls_created_by_fkey(*)')
-      .eq('id', pollId)
-      .single()
-
-    if (error) {
-      console.error('refetchPoll error', error)
-      return null
-    }
-
-    if (updatedPoll) {
-      const poll = updatedPoll as Poll
-      setPolls(prev => prev.map(p => (p.id === poll.id ? poll : p)))
-      setActivePoll(current => (current?.id === poll.id ? poll : current))
-    }
-    return updatedPoll
-  }, [])
-
   const navigateTo = (v: View, poll?: Poll) => {
     setView(v)
     if (v === 'poll' && poll) {
@@ -320,25 +299,14 @@ function AppContent() {
 
   const handleVote = async (poll: Poll, choice: 'yes' | 'no') => {
     if (!user) {
-      setPendingAction(() => handleVote(poll, choice))
+      setPendingAction(() => () => handleVote(poll, choice))
       setShowAuthModal(true)
       return
     }
 
     if (userVotes[poll.id]) return
 
-    // Optimistic update
     setUserVotes(prev => ({ ...prev, [poll.id]: choice }))
-    setPolls(prev => prev.map(p => {
-      if (p.id === poll.id) {
-        return {
-          ...p,
-          yes_votes: choice === 'yes' ? p.yes_votes + 1 : p.yes_votes,
-          no_votes: choice === 'no' ? p.no_votes + 1 : p.no_votes
-        }
-      }
-      return p
-    }))
 
     const { error } = await supabase
       .from('votes')
@@ -353,11 +321,15 @@ function AppContent() {
       })
     } else {
       showToast('Vote counted')
-      globeRef?.spawnArc(choice)
-      pushFeedEvent(`You voted ${choice.toUpperCase()}`, choice)
-      // Correct the optimistic count with the authoritative DB row
-      // (covers the DB trigger applying differently than our local +1 guess).
-      refetchPoll(poll.id)
+      const { data: fresh } = await supabase
+        .from('polls')
+        .select('*')
+        .eq('id', poll.id)
+        .single()
+      if (fresh) {
+        setPolls(prev => prev.map(p => p.id === fresh.id ? { ...p, ...fresh } : p))
+        setActivePoll(prev => prev?.id === fresh.id ? { ...prev, ...fresh } : prev)
+      }
     }
   }
 
@@ -616,6 +588,14 @@ function AppContent() {
       <div className="grid-overlay" />
       <div className="scanline" />
 
+      {/* Live stats strip */}
+      <LiveStatsStrip
+        totalVotes={totalVotes}
+        pollsCount={polls.length}
+        visitorCount={visitorCount}
+        visitorStatus={visitorStatus}
+      />
+
       {/* Header */}
       <Header
         user={user}
@@ -628,21 +608,13 @@ function AppContent() {
         onSearch={handleSearch}
         onCreatePoll={() => {
           if (!user) {
-            setPendingAction(() => navigateTo('create'))
+            setPendingAction(() => () => navigateTo('create'))
             setAuthMode('login')
             setShowAuthModal(true)
           } else {
             navigateTo('create')
           }
         }}
-      />
-
-      {/* Live stats strip */}
-      <LiveStatsStrip
-        totalVotes={totalVotes}
-        pollsCount={polls.length}
-        visitorCount={visitorCount}
-        visitorStatus={visitorStatus}
       />
 
       {/* Main content */}
