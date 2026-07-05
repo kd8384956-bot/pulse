@@ -176,6 +176,7 @@ function AppContent() {
       .channel('votes-changes')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'votes' }, (payload) => {
         const vote = payload.new as { poll_id: string; user_id: string; choice: 'yes' | 'no' }
+        fetchPolls()
         // NOTE: don't manually increment poll counts here. The `polls-changes`
         // channel below already refetches accurate counts from the DB whenever
         // your vote-count trigger updates the polls table. Incrementing here too
