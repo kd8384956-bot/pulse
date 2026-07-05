@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Analytics } from "@vercel/analytics/next"
+import { Analytics } from "@vercel/analytics/react"
 import { AuthProvider, useAuth } from '@/hooks/useAuth'
 import { supabase, Poll, Comment, Profile } from '@/lib/supabase'
 import Globe from '@/components/Globe'
