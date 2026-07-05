@@ -133,12 +133,24 @@ function AppContent() {
     }
   }, [user])
 
-  // Initial fetch
+  // Initial fetch (also re-runs on login/logout, since fetchUserVotes/fetchSavedPolls
+  // change identity whenever `user` changes)
   useEffect(() => {
     fetchPolls()
     fetchUserVotes()
     fetchSavedPolls()
   }, [fetchPolls, fetchUserVotes, fetchSavedPolls])
+
+  // FIX: clear personal vote/save state on logout.
+  // fetchUserVotes/fetchSavedPolls both early-return when `user` is null, so without
+  // this effect the previous session's votes and saved polls would linger in state
+  // after signing out (stale "you voted" badges, stale bookmarks, etc).
+  useEffect(() => {
+    if (!user) {
+      setUserVotes({})
+      setSavedPollIds(new Set())
+    }
+  }, [user])
 
   // Calculate total votes from polls
   useEffect(() => {
