@@ -51,6 +51,8 @@ function AppContent() {
   const [toast, setToast] = useState('')
   const [feedItems, setFeedItems] = useState<{ text: string; side: 'yes' | 'no' }[]>([])
   const [totalVotes, setTotalVotes] = useState(0)
+  const [visitorCount, setVisitorCount] = useState(0)
+  const [visitorStatus, setVisitorStatus] = useState<'loading' | 'ready' | 'error'>('loading')
   const [commentSort, setCommentSort] = useState<'helpful' | 'newest'>('helpful')
   const [globeRef, setGlobeRef] = useState<{ spawnArc: (side: 'yes' | 'no') => void } | null>(null)
 
@@ -105,6 +107,48 @@ function AppContent() {
     }
   }, [user])
 
+  const fetchVisitorCount = useCallback(async () => {
+    const { count, error } = await supabase
+      .from('site_visitors')
+      .select('visitor_id', { count: 'exact', head: true })
+
+    if (error) {
+      console.warn('Visitor count is not available yet:', error.message)
+      setVisitorStatus('error')
+      return
+    }
+
+    if (typeof count === 'number') {
+      setVisitorCount(count)
+      setVisitorStatus('ready')
+    }
+  }, [])
+
+  const recordVisitor = useCallback(async () => {
+    const storageKey = 'pulse_visitor_id'
+    let visitorId = localStorage.getItem(storageKey)
+
+    if (!visitorId) {
+      visitorId = crypto.randomUUID()
+      localStorage.setItem(storageKey, visitorId)
+    }
+
+    const { error } = await supabase
+      .from('site_visitors')
+      .upsert(
+        { visitor_id: visitorId, last_seen_at: new Date().toISOString() },
+        { onConflict: 'visitor_id' }
+      )
+
+    if (error) {
+      console.warn('Visitor tracking is not available yet:', error.message)
+      setVisitorStatus('error')
+      return
+    }
+
+    fetchVisitorCount()
+  }, [fetchVisitorCount])
+
   // Fetch comments for a poll
   const fetchComments = useCallback(async (pollId: string) => {
     const { data } = await supabase
@@ -142,6 +186,10 @@ function AppContent() {
     fetchSavedPolls()
   }, [fetchPolls, fetchUserVotes, fetchSavedPolls])
 
+  useEffect(() => {
+    recordVisitor()
+  }, [recordVisitor])
+
   // FIX: clear personal vote/save state on logout.
   // fetchUserVotes/fetchSavedPolls both early-return when `user` is null, so without
   // this effect the previous session's votes and saved polls would linger in state
@@ -172,15 +220,16 @@ function AppContent() {
       .channel('votes-changes')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'votes' }, (payload) => {
         const vote = payload.new as { poll_id: string; user_id: string; choice: 'yes' | 'no' }
-        // NOTE: don't manually increment poll counts here. The `polls-changes`
-        // channel below already refetches accurate counts from the DB whenever
-        // your vote-count trigger updates the polls table. Incrementing here too
-        // was double-counting the voter's own vote (once optimistically in
-        // handleVote, once again from this realtime echo of their own insert).
-        if (vote.user_id !== user?.id) {
-          globeRef?.spawnArc(vote.choice)
-          pushFeedEvent(`Someone voted ${vote.choice.toUpperCase()}`, vote.choice)
-        }
+        // The DB trigger updates poll counts; the polls channel refetches accurate totals.
+        globeRef?.spawnArc(vote.choice)
+
+        const isSelf = vote.user_id && userRef.current?.id && vote.user_id === userRef.current.id
+        pushFeedEvent(
+          isSelf
+            ? `You voted ${vote.choice.toUpperCase()}`
+            : `Someone voted ${vote.choice.toUpperCase()}`,
+          vote.choice
+        )
       })
       .subscribe()
 
@@ -503,6 +552,8 @@ function AppContent() {
       <LiveStatsStrip
         totalVotes={totalVotes}
         pollsCount={polls.length}
+        visitorCount={visitorCount}
+        visitorStatus={visitorStatus}
       />
 
       {/* Main content */}
@@ -818,7 +869,7 @@ function Header({ user, profile, onLogin, onLogout, onNavigate, searchQuery, onS
   )
 }
 
-function LiveStatsStrip({ totalVotes, pollsCount }: { totalVotes: number; pollsCount: number }) {
+function LiveStatsStrip({ totalVotes, pollsCount, visitorCount, visitorStatus }: { totalVotes: number; pollsCount: number; visitorCount: number; visitorStatus: 'loading' | 'ready' | 'error' }) {
   return (
     <div className="live-stats-strip" style={{
       position: 'relative',
@@ -836,6 +887,11 @@ function LiveStatsStrip({ totalVotes, pollsCount }: { totalVotes: number; pollsC
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontFamily: 'var(--font-mono)', fontSize: '12px', color: 'var(--muted)', whiteSpace: 'nowrap' }}>
         <b style={{ color: 'var(--text)' }}>{pollsCount}</b> active polls
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontFamily: 'var(--font-mono)', fontSize: '12px', color: 'var(--muted)', whiteSpace: 'nowrap' }}>
+        <b style={{ color: visitorStatus === 'error' ? 'var(--red)' : 'var(--text)' }}>
+          {visitorStatus === 'error' ? 'SETUP NEEDED' : formatNumber(visitorCount)}
+        </b> total visitors
       </div>
     </div>
   )
